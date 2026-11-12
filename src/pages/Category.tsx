@@ -1,17 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, fmt } from "../api";
+import { api, fmt, isGone, type ChannelSort } from "../api";
 import type { Post, VideoCard } from "../types";
 import { useStore } from "../store";
 import { Masonry, RowCard } from "../components/cards";
 import { Empty, Img } from "../components/ui";
 import { IBack, IChevR, IGrid, ITrophy } from "../icons";
 
+/** 上游 2026-11 在线的视频频道：短剧、漫剧，外加「黄果原创」（非分类 slug，走 is_original 过滤）。
+ *  《AI换脸》《AI魔改》两个分类已由上游下架（接口 410「内容已下线」），不再列出。 */
 export const CHANNELS = [
   { cate: "ai-duanju", name: "AI成人短剧", desc: "高能反转 · 一口气看完" },
   { cate: "ai-manju", name: "AI成人漫剧", desc: "国创漫剧 · 每周更新" },
-  { cate: "ai-huanlian", name: "AI换脸", desc: "换脸演绎 · 全新剧情" },
-  { cate: "ai-mogai", name: "AI魔改", desc: "魔改名场面 · 脑洞大开" },
+  { cate: "original", name: "黄果原创", desc: "官方自制 · 独家首发" },
 ] as const;
+
+/** 频道取数：原创没有分类 slug，用 /api/videos 的 is_original 过滤。
+ *  排序交给服务端：分页接口按 hot 降序返回，任何客户端跨页重排都会把新页插到已渲染内容前面。 */
+export const loadChannel = (cate: string, page: number, size: number, sort: ChannelSort) =>
+  cate === "original" ? api.original(page, size, sort) : api.category(cate, page, size, sort);
 
 /* ================= 分类总览 ================= */
 export default function Category({ wide, active }: { wide: boolean; active: boolean }) {
@@ -20,6 +26,8 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState<Record<string, boolean>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
+  /* 上游 410「内容已下线」的频道：不再显示重试，也不允许点进详情 */
+  const [gone, setGone] = useState<Record<string, boolean>>({});
   const mounted = useRef(false);
   const started = useRef(false);
   const pending = useRef(new Set<string>());
@@ -39,11 +47,15 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
         const result = await api.posts(1, 8);
         if (mounted.current) setPosts(result?.items || []);
       } else {
-        const result = await api.category(key, 1, 8);
+        // 预览行固定按热度：与上游默认顺序一致，换排序只发生在详情页
+        const result = await loadChannel(key, 1, 8, "hot");
         if (mounted.current) setRows(m => ({ ...m, [key]: result?.items || [] }));
       }
     } catch (error) {
-      if (mounted.current) setErrors(m => ({ ...m, [key]: (error as Error).message || "加载失败" }));
+      if (mounted.current) {
+        if (isGone(error)) setGone(m => ({ ...m, [key]: true }));
+        setErrors(m => ({ ...m, [key]: (error as Error).message || "加载失败" }));
+      }
     } finally {
       pending.current.delete(key);
       if (mounted.current) setLoading(m => ({ ...m, [key]: false }));
@@ -63,7 +75,7 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
       <div className="shrink-0 px-4 pb-1" style={{ paddingTop: "calc(var(--sat, 0px) + 14px)" }}>
         <div className="flex items-end gap-2.5">
           <span className="text-[24px] font-bold text-on leading-none">分类</span>
-          <span className="text-[11px] text-mut pb-0.5">{CHANNELS.length + 1} 个频道 · 每周持续上新</span>
+          <span className="text-[11px] text-mut pb-0.5">{CHANNELS.filter((c) => !gone[c.cate]).length + 1} 个频道 · 每周持续上新</span>
         </div>
       </div>
 
@@ -81,10 +93,11 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
 
         {CHANNELS.map((c, ci) => {
           const list = rows[c.cate] || [];
+          const off = !!gone[c.cate];
           return (
             <section key={c.cate} aria-label={c.name} className="mb-5 a-rise" style={{ animationDelay: `${Math.min(ci * 50, 300)}ms` }}>
-              <button onClick={() => push({ kind: "channel", cate: c.cate, name: c.name })}
-                className="w-full flex items-center gap-2.5 px-4 mb-2.5 text-left pressable group">
+              <button onClick={() => push({ kind: "channel", cate: c.cate, name: c.name })} disabled={off}
+                className={`w-full flex items-center gap-2.5 px-4 mb-2.5 text-left ${off ? "opacity-60" : "pressable group"}`}>
                 <span className="w-[36px] h-[36px] rounded-(--r-sm) tonal flex items-center justify-center shrink-0 text-primary">
                   <IGrid size={19} strokeWidth={1.9} />
                 </span>
@@ -92,15 +105,19 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
                   <span className="block text-[15.5px] font-semibold text-on leading-tight">{c.name}</span>
                   <span className="block text-[10.5px] text-mut mt-0.5 truncate">{c.desc}</span>
                 </span>
-                <span className="flex items-center gap-0.5 text-[11.5px] text-mut group-hover:text-primary transition-colors">
-                  全部<IChevR size={14} />
-                </span>
+                {off ? (
+                  <span className="text-[11px] text-dim">已下线</span>
+                ) : (
+                  <span className="flex items-center gap-0.5 text-[11.5px] text-mut group-hover:text-primary transition-colors">
+                    全部<IChevR size={14} />
+                  </span>
+                )}
               </button>
               <div className="scroll-x flex gap-2.5 px-4 snap-x">
                 {list.map((v) => (
                   <RowCard key={v.id} v={v} onOpen={() => push({ kind: "feed", videoIds: list.map((x) => x.id), index: list.findIndex((x) => x.id === v.id), title: c.name })} />
                 ))}
-                {!list.length && <PreviewStatus name={c.name} loading={loading[c.cate] !== false} error={errors[c.cate]} onRetry={() => void loadPreview(c.cate)} />}
+                {!list.length && <PreviewStatus name={c.name} loading={loading[c.cate] !== false} error={errors[c.cate]} gone={off} onRetry={() => void loadPreview(c.cate)} />}
               </div>
             </section>
           );
@@ -144,32 +161,48 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
   );
 }
 
-function PreviewStatus({ name, loading, error, onRetry }: { name: string; loading: boolean; error?: string; onRetry: () => void }) {
+function PreviewStatus({ name, loading, error, gone, onRetry }: { name: string; loading: boolean; error?: string; gone?: boolean; onRetry: () => void }) {
   return <div className="h-[150px] flex flex-col justify-center items-start gap-2 text-[11.5px] text-dim px-1">
     <span>{loading ? "加载中…" : error || "暂无内容"}</span>
-    {!loading && error && <button aria-label={`重试${name}`} onClick={onRetry} className="text-primary pressable">重试</button>}
+    {!loading && error && !gone && <button aria-label={`重试${name}`} onClick={onRetry} className="text-primary pressable">重试</button>}
   </div>;
 }
 
 /* ================= 频道详情页 ================= */
+
+/** 排序选项：上游只认 new / hot。score 排序不被支持，客户端按 score/id 重排会把
+ *  后续页的条目插到已渲染内容前面，滚动位置随之跳动，因此不再提供本地排序。 */
+const SORTS = [
+  { key: "new", label: "最新" },
+  { key: "hot", label: "最热" },
+] as const;
+
 export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: string; onBack: () => void; wide: boolean }) {
   const { push } = useStore();
-  const [sort, setSort] = useState<"最新" | "最热" | "高分">("最新");
+  const [sort, setSort] = useState<ChannelSort>("new");
   const [items, setItems] = useState<VideoCard[]>([]);
   const [page, setPage] = useState(0);
   const [pages, setPages] = useState(1);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [gone, setGone] = useState(false);
   const busy = useRef(false);
   const sentinel = useRef<HTMLDivElement>(null);
+  /** 每次切换排序自增；在途的旧排序响应回来时据此丢弃，避免插进新列表 */
+  const epoch = useRef(0);
+  /** 已提交的排序：旧渲染里的 loadMore 闭包据此立即退出，不去占用新列表的请求锁 */
+  const sortRef = useRef<ChannelSort>("new");
 
-  const loadMore = async () => {
-    if (busy.current || page >= pages) return;
+  const loadMore = useCallback(async () => {
+    if (busy.current || page >= pages || sort !== sortRef.current) return;
     busy.current = true;
+    const mine = epoch.current;
     setLoading(true);
     try {
       const next = page + 1;
-      const res = await api.category(cate, next, 20);
+      const res = await loadChannel(cate, next, 20, sort);
+      if (mine !== epoch.current) return;
+      // 只在尾部追加：展示顺序 = 服务端顺序，任何跨页重排都会让已渲染的卡片整体位移
       setItems((prev) => {
         const seen = new Set(prev.map((x) => x.id));
         return [...prev, ...(res?.items || []).filter((x) => !seen.has(x.id))];
@@ -178,28 +211,41 @@ export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: 
       setPages(res?.pagination?.pages || next);
       setErr(null);
     } catch (e) {
+      if (mine !== epoch.current) return;
+      if (isGone(e)) setGone(true);
       setErr((e as Error).message || "加载失败");
     } finally {
-      busy.current = false;
-      setLoading(false);
+      // 排序已切换时不要解新请求的锁
+      if (mine === epoch.current) {
+        busy.current = false;
+        setLoading(false);
+      }
     }
+  }, [cate, page, pages, sort]);
+
+  /** 换排序 = 换一份数据：清空列表并从第 1 页重拉，而不是对已加载内容重排 */
+  const changeSort = (next: ChannelSort) => {
+    if (next === sort) return;
+    epoch.current += 1;
+    sortRef.current = next;
+    busy.current = false;
+    setSort(next);
+    setItems([]);
+    setPage(0);
+    setPages(1);
+    setErr(null);
+    setGone(false);
   };
 
-  useEffect(() => { loadMore(); /* eslint-disable-next-line */ }, []);
+  // 首屏与切换排序都走这里：列表为空且没有错误时拉第 1 页
+  useEffect(() => { if (items.length === 0 && !err) loadMore(); /* eslint-disable-next-line */ }, [sort]);
   useEffect(() => {
     const el = sentinel.current;
     if (!el) return;
     const io = new IntersectionObserver((es) => { if (es[0].isIntersecting) loadMore(); }, { rootMargin: "600px" });
     io.observe(el);
     return () => io.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pages]);
-
-  const sorted = [...items].sort((a, b) => {
-    if (sort === "最热") return (b.hot || 0) - (a.hot || 0);
-    if (sort === "高分") return (b.score || 0) - (a.score || 0);
-    return b.id - a.id;
-  });
+  }, [loadMore]);
 
   return (
     <div className="absolute inset-0 bg-bg flex flex-col">
@@ -213,24 +259,28 @@ export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: 
           </div>
         </div>
         <div className="px-4 pb-3 flex gap-2">
-          {(["最新", "最热", "高分"] as const).map((s) => (
-            <button key={s} onClick={() => setSort(s)}
-              className={`px-4 h-8 rounded-(--r-ctl) text-[12px] font-semibold pressable ${sort === s ? "tonal text-on-sec" : "bg-s3 text-mut"}`}
-              style={sort === s ? { background: "var(--p-sec)", color: "var(--p-primary)" } : undefined}>{s}</button>
+          {SORTS.map((s) => (
+            <button key={s.key} onClick={() => changeSort(s.key)}
+              className={`px-4 h-8 rounded-(--r-ctl) text-[12px] font-semibold pressable ${sort === s.key ? "tonal text-on-sec" : "bg-s3 text-mut"}`}
+              style={sort === s.key ? { background: "var(--p-sec)", color: "var(--p-primary)" } : undefined}>{s.label}</button>
           ))}
         </div>
       </div>
       <div className="flex-1 scroll-y px-4 pt-3 pb-8">
-        {sorted.length ? (
-          <Masonry videos={sorted} wide={wide} onOpen={(v) => push({ kind: "feed", videoIds: sorted.map((x) => x.id), index: sorted.findIndex((x) => x.id === v.id), title: name })} />
+        {items.length ? (
+          <Masonry videos={items} wide={wide} onOpen={(v) => push({ kind: "feed", videoIds: items.map((x) => x.id), index: items.findIndex((x) => x.id === v.id), title: name })} />
         ) : err ? (
-          <Empty icon={<IGrid size={26} />} title="加载失败" sub={err} action="重试" onAction={loadMore} />
+          gone ? (
+            <Empty icon={<IGrid size={26} />} title="该频道已下线" sub="上游已下架这个分类，恢复后会自动出现" />
+          ) : (
+            <Empty icon={<IGrid size={26} />} title="加载失败" sub={err} action="重试" onAction={loadMore} />
+          )
         ) : (
           <div className="flex justify-center py-10"><div className="w-8 h-8 spinner" /></div>
         )}
         <div ref={sentinel} className="h-10" />
         {loading && <div className="flex justify-center py-3"><div className="w-6 h-6 spinner" /></div>}
-        {!loading && page >= pages && sorted.length > 0 && (
+        {!loading && page >= pages && items.length > 0 && (
           <div className="text-center text-[10.5px] text-dim py-3">— 已经到底啦 —</div>
         )}
       </div>

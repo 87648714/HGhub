@@ -3,10 +3,12 @@ import { api, APP_VERSION, hostOf, logLine, platform, type UpdateInfo } from "..
 import { useStore } from "../store";
 import { Modal, Toggle } from "../components/ui";
 import LinePicker from "../components/LinePicker";
+import FolderPicker from "../components/FolderPicker";
+import { downloadApi, type DownloadSettings } from "../download";
 import { copyPlaybackLog, initPlaybackLog, setPlaybackLog, usePlaybackLog } from "../playbackDiagnostics";
-import { IBack, IBoltF, IBroom, IChevR, IHeart, IInfo, ILink, ILockF, IMoon, IRefresh, ISettings, ISun, IVolMute } from "../icons";
+import { IBack, IBoltF, IBroom, IChevR, IFolder, IHeart, IInfo, ILink, ILockF, IMoon, IRefresh, ISettings, ISun, IVolMute } from "../icons";
 
-/* 独立设置页：线路 / 外观 / 播放 / 本地数据 / 清理缓存 / 网络诊断 / 关于
+/* 独立设置页：线路 / 外观 / 播放 / 下载 / 本地数据 / 清理缓存 / 网络诊断 / 关于
    入口：Windows 侧栏「设置」、Android「我的」右上角齿轮 */
 export default function Settings({ onBack, wide }: { onBack: () => void; wide: boolean }) {
   const { theme, setTheme, favs, history, muteOnStartup, setMuteOnStartup, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity, toast } = useStore();
@@ -19,11 +21,17 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const playbackLog = usePlaybackLog();
   const [copyingLog, setCopyingLog] = useState(false);
+  const [dl, setDl] = useState<DownloadSettings | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   const readLine = () => {
     api.lineState().then((s) => setLineBase(s.base)).catch(() => {});
   };
+  const readDownload = () => {
+    downloadApi.settings().then(setDl).catch(() => {});
+  };
   useEffect(readLine, []);
+  useEffect(readDownload, []);
   useEffect(() => { void initPlaybackLog(); }, []);
 
   const checkUpdate = async () => {
@@ -88,6 +96,34 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
             </div>
           </Section>
 
+          <Section title="下载">
+            <button onClick={() => { if (dl?.editable !== false) setPickerOpen(true); }} disabled={dl?.editable === false}
+              className="w-full flex items-center gap-3 px-3.5 py-3 text-left pressable disabled:opacity-100">
+              <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary shrink-0"><IFolder size={16} /></span>
+              <div className="flex-1 min-w-0">
+                <div className="text-[12.5px] text-on">保存位置</div>
+                <div className="text-[10.5px] text-mut break-all">{dl ? dl.dir : "读取中…"}</div>
+                <div className="text-[10.5px] text-dim mt-0.5">
+                  {dl?.editable === false
+                    ? "移动端受系统限制，固定在应用目录内；可在文件管理器中查找 HGhub 文件夹"
+                    : "按「剧集名 / 集数」保存（HLS 合并为 .ts / .mp4）；选定后会验证写入权限"}
+                </div>
+              </div>
+              {dl?.editable !== false && <IChevR size={15} className="text-mut shrink-0" />}
+            </button>
+            {dl && platform !== "android" && platform !== "ios" && (
+              <button onClick={() => downloadApi.openDir(dl.dir).catch((e) => toast((e as Error).message || "无法打开文件夹", "info"))}
+                className="w-full flex items-center gap-3 px-3.5 py-3 text-left pressable">
+                <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IFolder size={16} /></span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[12.5px] text-on">打开下载文件夹</div>
+                  <div className="text-[10.5px] text-mut">在系统文件管理器中查看已下载的剧集</div>
+                </div>
+                <IChevR size={15} className="text-mut" />
+              </button>
+            )}
+          </Section>
+
           <Section title="本地数据">
             <div className="flex items-center gap-3 px-3.5 py-3">
               <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IHeart size={16} /></span>
@@ -139,10 +175,13 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
             {/* 打不开时先点这里：把 DNS / 代理 / HTTP 结果复制给维护者 */}
             <button onClick={async () => {
               try {
-                const text = JSON.stringify(await api.netDiag(), null, 2);
+                const diag = await api.netDiag();
+                const text = JSON.stringify(diag, null, 2);
                 logLine(`[net_diag] ${text}`);
                 await navigator.clipboard?.writeText(text);
-                toast("网络诊断结果已复制", "ok");
+                // hint 是后端给的结论（污染 / 代理 / FakeIP），比让用户自己看 JSON 快得多
+                const hint = typeof diag.hint === "string" ? diag.hint : "";
+                toast(hint ? `已复制 · ${hint}` : "网络诊断结果已复制", "ok");
               } catch (e) {
                 toast((e as Error).message || "诊断失败", "info");
               }
@@ -150,7 +189,7 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
               <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><ILink size={16} /></span>
               <div className="flex-1">
                 <div className="text-[12.5px] text-on">网络诊断</div>
-                <div className="text-[10.5px] text-mut">检测 DNS / 系统代理 / 官网连通性</div>
+                <div className="text-[10.5px] text-mut">检测 DNS / 代理 / 官网连通性，并给出结论</div>
               </div>
               <IChevR size={15} className="text-mut" />
             </button>
@@ -206,6 +245,13 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
       </div>
 
       <LinePicker open={lineOpen} onClose={() => { setLineOpen(false); readLine(); }} />
+      <FolderPicker open={pickerOpen} value={dl?.dir} onClose={() => setPickerOpen(false)}
+        onPick={async (dir) => {
+          const next = await downloadApi.setDir(dir);
+          setDl(next);
+          setPickerOpen(false);
+          toast("保存位置已更新", "ok");
+        }} />
 
       <Modal open={about} onClose={() => setAbout(false)} width={392}>
         <div className="p-5">

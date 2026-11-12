@@ -31,3 +31,6 @@ docs/API.md
 
 # Agent instructions (local)
 AGENTS.md
+
+# Agent workspace data (local)
+.workbuddy/

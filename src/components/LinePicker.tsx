@@ -7,10 +7,14 @@ import { ICheck, IClose, IRefresh, ISettings } from "../icons";
 type ProbeMap = Record<string, LineProbe>;
 
 /* 单条线路：左侧点一下即切换，右侧单独检测 */
-function Row({ item, current, probe, busy, disabled, onPick, onProbe }: {
+function Row({ item, current, probe, busy, disabled, onPick, onProbe, onRemove }: {
   item: LineItem; current: boolean; probe?: LineProbe; busy: boolean; disabled: boolean;
-  onPick: (url: string) => void; onProbe: (url: string) => void;
+  onPick: (url: string) => void; onProbe: (url: string) => void; onRemove?: () => void;
 }) {
+  /* 失败原因要直接显示在行里：之前只放在 title 里，手机上根本看不到 */
+  const reason = probe && !probe.ok
+    ? probe.error || (probe.status ? `HTTP ${probe.status}` : "连接失败")
+    : "";
   return (
     <div className={`flex items-center gap-2 px-3.5 py-2.5 ${current ? "bg-s3/70" : ""}`}>
       <button onClick={() => onPick(item.url)} disabled={disabled} className="flex-1 min-w-0 text-left pressable disabled:opacity-60">
@@ -20,6 +24,7 @@ function Row({ item, current, probe, busy, disabled, onPick, onProbe }: {
           {current && <ICheck size={13} className="text-mint shrink-0" />}
         </div>
         <div className="text-[10.5px] text-mut truncate mt-0.5">{item.url}</div>
+        {!!reason && <div className="text-[10px] text-danger truncate mt-0.5 leading-snug">{reason}</div>}
       </button>
       <span
         title={probe ? (probe.error || (probe.status ? `HTTP ${probe.status}` : "")) : ""}
@@ -28,6 +33,10 @@ function Row({ item, current, probe, busy, disabled, onPick, onProbe }: {
       </span>
       <button onClick={() => onProbe(item.url)} disabled={busy || disabled}
         className="shrink-0 h-7 px-2.5 rounded-(--r-sm) bg-s4 text-[11px] text-on/80 pressable disabled:opacity-50">检测</button>
+      {onRemove && (
+        <button onClick={onRemove} disabled={disabled} aria-label="移除线路"
+          className="shrink-0 h-7 px-1.5 text-[11px] text-mut pressable disabled:opacity-50">移除</button>
+      )}
     </div>
   );
 }
@@ -43,6 +52,8 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
   const [probes, setProbes] = useState<ProbeMap>({});
   const [probing, setProbing] = useState("");
   const [switching, setSwitching] = useState("");
+  const [draft, setDraft] = useState("");
+  const [adding, setAdding] = useState(false);
 
   const readState = () => {
     api.lineState().then(setState).catch((e) => toast((e as Error).message || "读取线路失败", "info"));
@@ -104,8 +115,53 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
     }
   };
 
+  /* 手动加线路：先按业务接口校验，能取到地址清单才落盘并切换 */
+  const add = async () => {
+    let origin = "";
+    try {
+      const u = new URL(draft.trim());
+      if (u.protocol !== "https:" || u.pathname !== "/" || u.search || u.hash || u.username || u.password) {
+        throw new Error("bad");
+      }
+      origin = u.origin;
+    } catch {
+      toast("需要纯 HTTPS 站点地址，如 https://example.com（不能带路径或参数）", "info");
+      return;
+    }
+    setAdding(true);
+    try {
+      const [r] = await api.lineProbe([origin]);
+      if (!r?.ok) {
+        toast(`不能作为线路：${r?.error || (r?.status ? `HTTP ${r.status}` : "连接失败")}`, "info");
+        return;
+      }
+      setProbes((p) => ({ ...p, [origin]: r }));
+      await api.lineCustomAdd(origin);
+      const next = await api.lineSet(origin);
+      if (next !== state?.base) setUser(null);
+      setDraft("");
+      readState();
+      toast(`已添加并切换到 ${hostOf(next)}，跨站点需重新登录`, "ok");
+    } catch (e) {
+      toast((e as Error).message || "添加失败", "info");
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const remove = async (url: string) => {
+    try {
+      await api.lineCustomRemove(url);
+      readState();
+      toast(state?.base === url ? "已移除，当前仍在使用这条，切换后失效" : "已移除", "info");
+    } catch (e) {
+      toast((e as Error).message || "移除失败", "info");
+    }
+  };
+
   const fixed = state?.fixed || [];
-  const busyAll = !!probing || !!switching;
+  const custom = state?.custom || [];
+  const busyAll = !!probing || !!switching || adding;
 
   const body = (
     <div className="flex flex-col min-h-0" style={{ maxHeight: isMobile ? "74vh" : "min(72vh, 620px)" }}>
@@ -133,6 +189,32 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
               busy={probing === it.url} disabled={busyAll} onPick={pick} onProbe={(u) => probe([{ url: u }], u)} />
           ))}
           {!fixed.length && <div className="px-3.5 py-3 text-[11px] text-mut">读取中…</div>}
+        </div>
+
+        <div className="flex items-center gap-2 px-1 mt-4 mb-1.5">
+          <span className="text-[10.5px] font-semibold text-dim tracking-wide">自定义线路</span>
+          <span className="text-[10px] text-dim">添加前先校验能否取到地址清单</span>
+        </div>
+        <div className="rounded-(--r-md) bg-s2 overflow-hidden">
+          <div className="flex items-center gap-2 px-3 py-2">
+            <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="https://example.com"
+              onKeyDown={(e) => { if (e.key === "Enter") void add(); }}
+              inputMode="url" autoCapitalize="off" autoCorrect="off" spellCheck={false}
+              className="flex-1 min-w-0 h-9 px-3 rounded-(--r-sm) bg-s4 text-[12px] text-on placeholder-mut outline-none focus:ring-2 focus:ring-[var(--p-primary)]" />
+            <button onClick={() => void add()} disabled={!draft.trim() || busyAll}
+              className="shrink-0 h-9 px-3 rounded-(--r-sm) bg-primary text-on-primary text-[11.5px] font-semibold pressable disabled:opacity-50">
+              {adding ? "校验中…" : "添加"}
+            </button>
+          </div>
+          {!!custom.length && (
+            <div className="divide-y divide-s3 border-t border-s3">
+              {custom.map((it) => (
+                <Row key={it.url} item={it} current={state?.base === it.url} probe={probes[it.url]}
+                  busy={probing === it.url} disabled={busyAll} onPick={pick}
+                  onProbe={(u) => probe([{ url: u }], u)} onRemove={() => void remove(it.url)} />
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-2 px-1 mt-4 mb-1.5">
@@ -170,7 +252,8 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
         )}
 
         <div className="text-[10px] text-dim leading-relaxed px-1 mt-4">
-          切换后立即生效，请求链路与数据模型不变。不做自动检测 / 自动切换，只有点「检测」时才探测一次。
+          切换后立即生效，请求链路与数据模型不变。不做自动检测 / 自动切换；「检测」请求的是站点的地址清单接口，首页能打开不代表能当线路用。
+          开了代理仍失败时：请用固定 HTTP 代理（PAC 不生效），安卓需要 TUN 模式。
         </div>
       </div>
     </div>

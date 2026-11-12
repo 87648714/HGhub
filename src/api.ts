@@ -43,6 +43,13 @@ export const playlist = (url: string) => `${LOCAL}/hls?u=${encodeURIComponent(ur
 /** 写一行到应用数据目录 debug.log（用户反馈「打不开」时要的就是它） */
 export const logLine = (msg: string) => invoke("debug_log", { msg }).catch(() => {});
 
+/** 上游 410（内容/分类已下线）的标记前缀，见 Rust `net::edge`。 */
+const GONE_PREFIX = "http_gone: ";
+
+/** 上游明确下线的错误：重试、换线路都不会恢复，界面应显示「已下线」而不是「重试」。 */
+export type GoneError = Error & { gone: true };
+export const isGone = (e: unknown) => (e as { gone?: boolean } | null | undefined)?.gone === true;
+
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   try {
     return (await invoke(cmd, args)) as T;
@@ -50,6 +57,11 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
     const msg = typeof e === "string" ? e : "请求失败，请检查网络";
     // 落盘完整错误链（dns error / connection refused / 证书错误…），toast 只显示截断版
     logLine(`[api] ${cmd} → ${msg}`);
+    if (msg.startsWith(GONE_PREFIX)) {
+      const err = new Error(msg.slice(GONE_PREFIX.length).trim() || "内容已下线") as GoneError;
+      err.gone = true;
+      throw err;
+    }
     const status = /^HTTP (\d{3})\b/.exec(msg)?.[1];
     if (status) {
       throw new Error(`服务器请求失败（HTTP ${status}），请稍后重试或在设置中切换线路`);
@@ -59,6 +71,10 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 }
 
 /* ── 接口 ───────────────────────────────────────────────── */
+
+/** 列表排序：上游只认 new（最新在前）/ hot（热度降序，也是默认序）。
+ *  分页接口必须由服务端排序——客户端跨页重排会把新一页插到已渲染内容前面，滚动位置随之跳动。 */
+export type ChannelSort = "new" | "hot";
 
 export const api = {
   boot: () =>
@@ -78,8 +94,11 @@ export const api = {
   me: () => call<User>("api_me"),
 
   feed: (page = 1, size = 20) => call<Paged<VideoCard>>("api_feed", { page, size }),
-  category: (cate: string, page = 1, size = 20) =>
-    call<Paged<VideoCard>>("api_category", { cate, page, size }),
+  category: (cate: string, page = 1, size = 20, sort: ChannelSort = "hot") =>
+    call<Paged<VideoCard>>("api_category", { cate, page, size, sort }),
+  /** 黄果原创：上游没有分类 slug，走 /api/videos 的 is_original 过滤 */
+  original: (page = 1, size = 20, sort: ChannelSort = "hot") =>
+    call<Paged<VideoCard>>("api_original", { page, size, sort }),
   rank: (kind: "hot" | "recommend" | "potential") =>
     call<{ type: string; items: RankItem[] }>("api_rank", { kind }),
   search: (q: string, page = 1, size = 20) =>
@@ -111,6 +130,8 @@ export const api = {
   lineSet: (url: string) => call<string>("line_set", { url }),
   lineMirrors: () => call<LineMirrors>("line_mirrors"),
   lineProbe: (urls: string[]) => call<LineProbe[]>("line_probe", { urls }),
+  lineCustomAdd: (url: string) => call<string>("line_custom_add", { url }),
+  lineCustomRemove: (url: string) => call<void>("line_custom_remove", { url }),
 
   /* 更新检查：对比 GitHub Release 的 tag */
   checkUpdate: () => call<UpdateInfo>("check_update"),
@@ -133,7 +154,8 @@ export type UpdateInfo = {
 /* ── 线路（数据源） ─────────────────────────────────────── */
 
 export type LineItem = { name?: string; url: string; host?: string; note?: string };
-export type LineState = { base: string; default: string; fixed: LineItem[] };
+/** `custom`：用户手动添加的线路，随应用数据目录持久化 */
+export type LineState = { base: string; default: string; fixed: LineItem[]; custom?: LineItem[] };
 /** `source`：清单来源（官方地址接口 / 地址发布页）；`cached`：两个来源都不可达，展示的是上次缓存 */
 export type LineMirrors = { source: string; script?: string; items: LineItem[]; cached?: boolean };
 export type LineProbe = { url: string; ok: boolean; status?: number; ms: number; error?: string };

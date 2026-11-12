@@ -31,14 +31,17 @@ export function WaterfallCard({ v, onOpen }: { v: VideoCard; onOpen: () => void 
 }
 
 /* ——— 近无缝瀑布流 ——— */
+/* 卡片比例固定（paddingTop 132%），所以用 grid 而不是 CSS 多列：
+   多列（columns + column-fill:balance）在分页追加时会把已有卡片重新分配到各列——
+   滚动条位置没变、内容却整体位移，用户看到的就是「加载下一页后页面跳回去了」。
+   grid 只在末尾追加行，已渲染的卡片位置永远不动。 */
 export function Masonry({ videos, onOpen, wide = false, gap = "gap-1" }: {
   videos: VideoCard[]; onOpen: (v: VideoCard) => void; wide?: boolean; gap?: string;
 }) {
-  const mb = gap === "gap-1" ? "mb-1" : "mb-1.5";
   return (
-    <div className={`${wide ? "columns-3 xl:columns-4" : "columns-2"} ${gap} [column-fill:balance]`}>
+    <div className={`grid ${wide ? "grid-cols-3 xl:grid-cols-4" : "grid-cols-2"} ${gap}`}>
       {videos.map((v) => (
-        <div key={v.id} className={`break-inside-avoid ${mb}`}>
+        <div key={v.id}>
           <WaterfallCard v={v} onOpen={() => onOpen(v)} />
         </div>
       ))}

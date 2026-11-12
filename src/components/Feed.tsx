@@ -8,9 +8,11 @@ import VideoSurface, { type VideoHandle } from "./VideoSurface";
 import PlayerControls from "./PlayerControls";
 import PlaybackLock from "./PlaybackLock";
 import { ArticlePanel, CommentsPanel, EpisodesPanel } from "./Panels";
+import DownloadChip from "./DownloadChip";
+import { useDownloadJob } from "../download";
 import { setBackHandler } from "../back";
 import {
-  IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IExpand, IFileText, IHeart, IHeartF,
+  IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IDownload, IExpand, IFileText, IHeart, IHeartF,
   ILink, IList, ILockF, IPauseF, IPlayF, ISearch, IStar, IStarF, IVol, IVolMute,
 } from "../icons";
 
@@ -56,6 +58,11 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const [playTry, setPlayTry] = useState(0);
   const [panel, setPanel] = useState<"episodes" | "comments" | "article" | "detail" | null>(null);
   const [descOpen, setDescOpen] = useState(false);
+  /* 下载：任务在 Rust 侧跑，这里只轮询进度 */
+  const { job: dlJob, running: dlRunning, start: startDownload, cancel: cancelDownload, dismiss: dismissDownload } = useDownloadJob({
+    onDone: (s) => toast(`第 ${s.ep} 集已保存`, "ok"),
+    onError: (s) => toast(s.error || "下载失败", "info"),
+  });
   /* 续播：拿到时长后再 seek 一次（只对进入时那一条生效） */
   const resumeRef = useRef<{ key: string; t: number } | null>(
     startTime && startTime > 1 ? { key: `${videoIds[startIndex]}:${startEp || 1}`, t: startTime } : null,
@@ -195,6 +202,16 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const shareLink = () => {
     const u = kind === "post" ? (posts[curId]?.video_url || meta.title) : `https://huangguoai.com/video/${curId}/`;
     navigator.clipboard?.writeText(u).then(() => toast("链接已复制", "ok")).catch(() => {});
+  };
+
+  /* 下载当前集：用 api_play 返回的原始播放地址，由 Rust 侧拉取全部分片并合并落盘 */
+  const onDownload = () => {
+    if (kind !== "video") { toast("该内容暂不支持下载", "info"); return; }
+    if (dlRunning) { toast("正在下载中，请等当前任务结束", "info"); return; }
+    if (!playUrl) { toast("播放地址还没准备好，请稍候", "info"); return; }
+    startDownload(playUrl, meta.title || `视频${curId}`, curEp)
+      .then(() => toast(`开始下载 第 ${curEp} 集`, "ok"))
+      .catch((e) => toast((e as Error).message || "开始下载失败", "info"));
   };
 
   /* 倍速：长按 / 锁定 → 2.0x，否则用基准倍速 */
@@ -1072,6 +1089,12 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                     <IExpand size={26} className="hg-ink hg-ov-shadow" />
                     <span className="text-[10.5px] hg-ink-2 hg-ov-shadow">全屏</span>
                   </button>
+                  {kind === "video" && (
+                    <button onClick={onDownload} className="flex flex-col items-center gap-1 pressable" aria-label="下载本集">
+                      <IDownload size={25} className={dlRunning ? "hg-gold" : "hg-ink hg-ov-shadow"} />
+                      <span className="text-[10.5px] hg-ink-2 hg-ov-shadow">下载</span>
+                    </button>
+                  )}
                   <button onClick={shareLink} className="flex flex-col items-center gap-1 pressable" aria-label="分享">
                     <ILink size={25} className="hg-ink hg-ov-shadow" />
                     <span className="text-[10.5px] hg-ink-2 hg-ov-shadow">分享</span>
@@ -1207,6 +1230,8 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
           onLock={lockControls}
           onTheater={() => setTheater((v) => !v)}
           onFullscreen={toggleFull}
+          onDownload={kind === "video" ? onDownload : undefined}
+          downloadActive={dlRunning}
           onNext={() => {
             const nx = episodes.find((e) => e.ep_num === curEp + 1);
             if (nx) pickEp(nx.ep_num);
@@ -1324,6 +1349,13 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
         </div>
       )}
       {controlsLocked && <PlaybackLock active={active} onUnlock={() => { setControlsLocked(false); wake(); }} />}
+
+      {dlJob && (
+        <DownloadChip job={dlJob} align={isDesktop ? "right" : "left"}
+          top={isDesktop ? 64 : undefined}
+          bottom={isDesktop ? undefined : bottomInset + (fs ? 20 : 198)}
+          onCancel={() => void cancelDownload()} onDismiss={dismissDownload} />
+      )}
     </div>
   );
 }

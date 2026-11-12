@@ -55,10 +55,11 @@ export function PostsPage({ onBack, wide }: { onBack: () => void; wide: boolean 
       </div>
       <div className="flex-1 scroll-y px-3 pt-3 pb-8">
         {items.length ? (
-          <div className={`${wide ? "columns-3 xl:columns-4" : "columns-2"} gap-2`}>
+          // 与 Masonry 同理：多列布局会在追加分页时重排已有卡片，改用 grid 只往末尾加行
+          <div className={`grid ${wide ? "grid-cols-3 xl:grid-cols-4" : "grid-cols-2"} gap-2`}>
             {items.map((p) => (
               <button key={p.id} onClick={() => push({ kind: "post", id: p.id })}
-                className="w-full break-inside-avoid mb-2 relative rounded-(--r-sm) overflow-hidden bg-s1 elev-1 pressable block"
+                className="w-full relative rounded-(--r-sm) overflow-hidden bg-s1 elev-1 pressable block"
                 style={{ paddingTop: "128%" }}>
                 <Img src={p.cover} />
                 <div className="absolute inset-x-0 bottom-0 h-2/3 bg-gradient-to-t from-black/90 via-black/40 to-transparent" />

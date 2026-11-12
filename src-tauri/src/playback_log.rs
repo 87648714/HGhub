@@ -56,6 +56,9 @@ pub fn error_kind(error: &str) -> &'static str {
         }
     } else if error.contains("DNS") {
         "dns_error"
+    } else if error.starts_with("http_gone:") {
+        // 上游明确说「内容已下线」：不是传输故障，重试和换线路都不会恢复。
+        "content_gone"
     } else if error.contains("超时") || error.to_ascii_lowercase().contains("timeout") {
         "timeout"
     } else if error.starts_with("HTTP ") {

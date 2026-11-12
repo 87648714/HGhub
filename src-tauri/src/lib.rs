@@ -1,4 +1,5 @@
 mod api;
+mod download;
 mod lines;
 mod logging;
 #[cfg(target_os = "macos")]
@@ -59,6 +60,7 @@ pub fn run() {
                 net::bind_base(&dir);
                 lines::bind(&dir);
                 playback_log::bind(&dir);
+                download::bind(&dir);
                 let state: tauri::State<Api> = app.state();
                 state.session.bind(dir);
             }
@@ -144,8 +146,20 @@ pub fn run() {
             api::line_set,
             api::line_mirrors,
             api::line_probe,
+            api::line_custom_add,
+            api::line_custom_remove,
             api::check_update,
             api::open_url,
+            download::download_settings,
+            download::download_dir_set,
+            download::download_dir_reset,
+            download::download_open_dir,
+            download::dir_roots,
+            download::dir_list,
+            download::dir_create,
+            download::download_start,
+            download::download_status,
+            download::download_cancel,
             api::set_orientation,
             api::api_login,
             api::api_register,
@@ -153,6 +167,7 @@ pub fn run() {
             api::api_me,
             api::api_feed,
             api::api_category,
+            api::api_original,
             api::api_rank,
             api::api_search,
             api::cache_clear,

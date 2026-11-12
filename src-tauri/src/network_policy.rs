@@ -122,6 +122,33 @@ pub fn allowed_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// 已知的大陆 DNS 污染落点（Facebook / Dropbox 等与目标无关的网段）。
+///
+/// 这是**辅助判断**，不是安全判定：命中只代表「这次解析结果不可信」，调用方据此跳过地址固定，
+/// 让代理或系统在真正连接时重新解析。能不能访问仍由 [`allowed_ip`] 决定。
+fn polluted_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, c, _] = ip.octets();
+            (a == 31 && b == 13)
+                || (a == 157 && b == 240)
+                || (a == 69 && b == 171 && (224..=255).contains(&c))
+                || (a == 108 && b == 160 && (160..=175).contains(&c))
+                || (a == 128 && b == 242 && (240..=247).contains(&c))
+        }
+        IpAddr::V6(ip) => {
+            let s = ip.segments();
+            // Facebook 的 2a03:2880::/32，被墙域名常被指到这里。
+            s[0] == 0x2a03 && s[1] == 0x2880
+        }
+    }
+}
+
+/// 全部答案都落在已知污染网段时才算污染。混合答案按正常处理，不扩大放行范围。
+pub fn pollution_suspect(addrs: &[SocketAddr]) -> bool {
+    !addrs.is_empty() && addrs.iter().all(|a| polluted_ip(a.ip()))
+}
+
 pub fn parse_target(raw: &str) -> Result<Url, String> {
     parse_target_with_mode(raw, strict_security())
 }
@@ -366,6 +393,23 @@ mod tests {
             redirect_target(&current, "/next").unwrap().as_str(),
             "https://example.com/next"
         );
+    }
+
+    #[test]
+    fn pollution_heuristic_only_flags_known_sinkholes() {
+        let polluted: Vec<SocketAddr> = ["108.160.169.55:443", "[2a03:2880:f11c:8183::1]:443"]
+            .into_iter()
+            .map(|raw| raw.parse().unwrap())
+            .collect();
+        assert!(pollution_suspect(&polluted));
+        // 真实 CDN 地址与污染答案混在一起时按正常处理，避免误判放大放行范围。
+        let mixed: Vec<SocketAddr> = ["65.8.180.27:443", "108.160.169.55:443"]
+            .into_iter()
+            .map(|raw| raw.parse().unwrap())
+            .collect();
+        assert!(!pollution_suspect(&mixed));
+        assert!(!pollution_suspect(&[]));
+        assert!(!pollution_suspect(&["65.8.180.27:443".parse().unwrap()]));
     }
 
     #[test]

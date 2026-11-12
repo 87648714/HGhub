@@ -159,6 +159,27 @@ fn cached_client(cache: &ClientCache, key: &str, now: Instant) -> Option<Arc<req
         .map(|(_, http)| http.clone())
 }
 
+/// 环境里是否配了代理（`HGHUB_PROXY` 或 `HTTP(S)_PROXY` / `ALL_PROXY`）。
+///
+/// 有代理时域名由代理远端解析：本地 DNS 只会拿到污染结果，把它固定下来只会把连接指向错误 IP。
+/// 客户端内置的「系统代理」（注册表）不算在内——reqwest 自己会用，但应用看不到，只能靠污染判定兜住。
+/// PAC 不在支持范围内。
+pub fn proxy_in_use() -> bool {
+    if proxy_override().is_some() {
+        return true;
+    }
+    [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ]
+    .iter()
+    .any(|key| std::env::var(*key).is_ok_and(|v| !v.trim().is_empty()))
+}
+
 /// 缓存按模式、主机和端口隔离；有效期内仅复用已经检查并固定地址的客户端。
 /// 到期后重新检查全部 DNS 答案，不使用旧连接绕过新的目标检查。
 async fn client_for(raw: &str) -> Result<(url::Url, Arc<reqwest::Client>), String> {
@@ -173,10 +194,18 @@ async fn client_for(raw: &str) -> Result<(url::Url, Arc<reqwest::Client>), Strin
             return Ok((target, http));
         }
     }
-    let addrs = if strict {
-        network_policy::resolve_target(&target, strict).await?
-    } else {
+    let addrs: Vec<SocketAddr> = if !strict {
         Vec::new()
+    } else if proxy_in_use() {
+        // 走代理时目标地址由代理解析；本地解析既慢又可能被污染，不参与连接。
+        Vec::new()
+    } else {
+        match network_policy::resolve_target(&target, strict).await {
+            // 解析结果是已知污染网段：固定它只会连到错误地址，交给连接时重新解析。
+            Ok(list) if !network_policy::pollution_suspect(&list) => list,
+            Ok(_) => Vec::new(),
+            Err(e) => return Err(e),
+        }
     };
     let http = Arc::new(build_client(host, &addrs)?);
     let now = Instant::now();
@@ -312,7 +341,8 @@ pub fn err_text(e: &reqwest::Error) -> String {
 }
 
 fn dns_summary(addrs: impl IntoIterator<Item = SocketAddr>) -> Value {
-    let mut ips: Vec<_> = addrs.into_iter().map(|addr| addr.ip()).collect();
+    let addrs: Vec<SocketAddr> = addrs.into_iter().collect();
+    let mut ips: Vec<_> = addrs.iter().map(|addr| addr.ip()).collect();
     ips.sort_unstable();
     ips.dedup();
     let has_fake_ip = ips.iter().any(|ip| {
@@ -325,7 +355,11 @@ fn dns_summary(addrs: impl IntoIterator<Item = SocketAddr>) -> Value {
             a == 198 && (b == 18 || b == 19)
         })
     });
-    json!({ "count": ips.len(), "has_fake_ip": has_fake_ip })
+    json!({
+        "count": ips.len(),
+        "has_fake_ip": has_fake_ip,
+        "suspect_pollution": network_policy::pollution_suspect(&addrs),
+    })
 }
 
 /// 网络自检：DNS / HTTP / 代理相关环境变量，用于远程定位「打不开」。
@@ -362,11 +396,33 @@ pub async fn diagnose() -> Value {
         }),
     };
 
+    let proxied = proxy_in_use();
+    let suspect = dns
+        .get("suspect_pollution")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let fake_ip = dns
+        .get("has_fake_ip")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // 只给结论性提示，不回传解析到的具体地址，避免诊断内容泄露过多网络细节。
+    let hint = if suspect {
+        "DNS 解析到已知污染网段：本次已跳过地址固定。若仍打不开，请改用固定 HTTP 代理（PAC 不生效）或 TUN 模式"
+    } else if fake_ip && !proxied {
+        "DNS 返回 FakeIP：流量由 TUN 接管，关掉 TUN 后该地址不可路由"
+    } else if proxied {
+        "已检测到代理：域名由代理远端解析，本地 DNS 结果不参与连接"
+    } else {
+        "未检测到代理，所有请求直连"
+    };
+
     json!({
         "base": cur,
         "host": host,
         "dns": dns,
         "http": http,
+        "proxy_in_use": proxied,
+        "hint": hint,
         "env": {
             "HTTP_PROXY": std::env::var("HTTP_PROXY").ok().map(|p| redact_proxy(&p)),
             "HTTPS_PROXY": std::env::var("HTTPS_PROXY").ok().map(|p| redact_proxy(&p)),
@@ -394,6 +450,7 @@ fn retryable_error(error: &str) -> bool {
             | "private_address_denied"
             | "target_policy_denied"
             | "redirect_error"
+            | "content_gone"
     )
 }
 
@@ -462,6 +519,16 @@ fn edge_redirect_target(
         return Err("业务接口重定向已拒绝".into());
     }
     network_policy::redirect_target(current, location)
+}
+
+/// 410 的正文仍是业务 JSON（`{"status":0,"msg":"内容已下线"}`），优先把 msg 给用户看。
+fn gone_message(text: &str) -> String {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|v| v.get("msg").and_then(Value::as_str).map(str::to_owned))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "内容已下线".to_string())
 }
 
 /// 业务请求：走边缘信封。
@@ -568,6 +635,11 @@ pub async fn edge(
                     let text = resp.text().await.map_err(|e| err_text(&e))?;
                     if status.as_u16() == 401 || status.as_u16() == 403 {
                         return Err("401".to_string());
+                    }
+                    // 410 是上游的业务结论（分类关停 / 视频下架），换线路或重试都不会恢复，
+                    // 所以单独给一个可识别的标记，前端据此显示「已下线」而不是「切换线路重试」。
+                    if status.as_u16() == 410 {
+                        return Err(format!("http_gone: {}", gone_message(&text)));
                     }
                     if !status.is_success() {
                         return Err(format!(
@@ -733,12 +805,15 @@ mod tests {
             .map(|raw| raw.parse().unwrap())
             .collect();
         let summary = dns_summary(addrs);
-        assert_eq!(summary, json!({"count": 3, "has_fake_ip": true}));
+        assert_eq!(
+            summary,
+            json!({"count": 3, "has_fake_ip": true, "suspect_pollution": false})
+        );
         assert!(!summary.to_string().contains("10.0.0.1"));
         assert!(!summary.to_string().contains("198.18"));
         assert_eq!(
             dns_summary(Vec::<SocketAddr>::new()),
-            json!({"count":0,"has_fake_ip":false})
+            json!({"count":0,"has_fake_ip":false,"suspect_pollution":false})
         );
     }
 
@@ -788,6 +863,16 @@ mod tests {
         }
         assert!(edge_redirect_target(&current, 301, "http://example.com/", true).is_err());
         assert!(edge_redirect_target(&current, 301, "https://127.0.0.1/", true).is_err());
+    }
+
+    #[test]
+    fn gone_message_prefers_business_reason() {
+        assert_eq!(
+            gone_message(r#"{"data":[],"status":0,"msg":"内容已下线"}"#),
+            "内容已下线"
+        );
+        assert_eq!(gone_message(""), "内容已下线");
+        assert_eq!(gone_message("<html>410 Gone</html>"), "内容已下线");
     }
 
     #[test]

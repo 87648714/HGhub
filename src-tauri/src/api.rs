@@ -63,6 +63,7 @@ pub async fn line_state() -> Result<Value, String> {
         "base": base(),
         "default": crate::net::DEFAULT_BASE,
         "fixed": crate::lines::fixed(),
+        "custom": crate::lines::custom(),
     }))
 }
 
@@ -85,11 +86,23 @@ pub async fn line_mirrors() -> Result<Value, String> {
     crate::lines::mirrors().await
 }
 
-/// 可达性探测：只报结果，不做自动检查 / 自动切换。
+/// 可达性探测：打业务接口判断是不是真线路，只报结果，不做自动检查 / 自动切换。
 #[tauri::command]
 pub async fn line_probe(urls: Vec<String>) -> Result<Value, String> {
     crate::net::refresh_client();
     Ok(crate::lines::probe(urls).await)
+}
+
+/// 保存一条手动添加的线路（可用性由前端先跑一次 `line_probe` 判断）。
+#[tauri::command]
+pub async fn line_custom_add(url: String) -> Result<String, String> {
+    crate::lines::custom_add(&url)
+}
+
+/// 移除自定义线路。
+#[tauri::command]
+pub async fn line_custom_remove(url: String) -> Result<(), String> {
+    crate::lines::custom_remove(&url)
 }
 
 /* ───────────────────────── 更新检查 ───────────────────────── */
@@ -408,6 +421,15 @@ pub async fn api_me(state: State<'_, Api>) -> Result<Value, String> {
 
 /* ───────────────────────── 列表 ───────────────────────── */
 
+/// 列表排序白名单：上游只认 `new` 与 `hot`（传其他值一律回落到热度序）。
+/// 分页必须由服务端排序——客户端对已加载合集重排会把新一页插到前面，滚动位置就会跳。
+fn sort_param(raw: Option<&str>) -> &'static str {
+    match raw.map(str::trim) {
+        Some("new") | Some("latest") => "new",
+        _ => "hot",
+    }
+}
+
 #[tauri::command]
 pub async fn api_feed(state: State<'_, Api>, page: u32, size: u32) -> Result<Value, String> {
     state
@@ -421,10 +443,28 @@ pub async fn api_category(
     cate: String,
     page: u32,
     size: u32,
+    sort: Option<String>,
 ) -> Result<Value, String> {
+    let sort = sort_param(sort.as_deref());
     state
         .get(&format!(
-            "/api/videos/category/{cate}?page={page}&size={size}"
+            "/api/videos/category/{cate}?page={page}&size={size}&sort={sort}"
+        ))
+        .await
+}
+
+/// 黄果原创：上游没有对应分类 slug，走视频列表的 `is_original=1` 过滤。
+#[tauri::command]
+pub async fn api_original(
+    state: State<'_, Api>,
+    page: u32,
+    size: u32,
+    sort: Option<String>,
+) -> Result<Value, String> {
+    let sort = sort_param(sort.as_deref());
+    state
+        .get(&format!(
+            "/api/videos?page={page}&size={size}&is_original=1&sort={sort}"
         ))
         .await
 }
@@ -626,8 +666,20 @@ pub async fn api_post_comments(
 }
 #[cfg(test)]
 mod tests {
-    use super::{has_play_url, is_newer, normalize_play_info};
+    use super::{has_play_url, is_newer, normalize_play_info, sort_param};
     use serde_json::{json, Value};
+
+    /// 列表排序只允许上游确认有效的两个值；未知输入不能拼进请求路径。
+    #[test]
+    fn sort_param_only_accepts_known_values() {
+        assert_eq!(sort_param(Some("new")), "new");
+        assert_eq!(sort_param(Some(" latest ")), "new");
+        assert_eq!(sort_param(Some("hot")), "hot");
+        assert_eq!(sort_param(Some("score")), "hot");
+        assert_eq!(sort_param(Some("new&size=999")), "hot");
+        assert_eq!(sort_param(Some("")), "hot");
+        assert_eq!(sort_param(None), "hot");
+    }
 
     #[test]
     fn new_playback_streams_fill_legacy_url_fields() {

@@ -10,6 +10,8 @@
     "preview": "vite preview",
     "test:playback": "node scripts/test-playback.mjs",
     "test:api-loading": "node scripts/test-api-loading.mjs",
+    "test:scroll": "node scripts/test-infinite-scroll.mjs",
+    "test:channel": "node scripts/test-channel-scroll.mjs",
     "tauri": "tauri",
     "app:dev": "tauri dev",
     "app:build": "tauri build",

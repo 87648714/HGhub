@@ -12,6 +12,9 @@
 //!
 //! 两个来源都取不到时，回退到上次成功缓存的清单（应用数据目录 `lines.json`），
 //! 至少让用户还能手动挑一条能用的线路。
+//!
+//! 用户也可以手动加线路（`custom_lines.json`）。可用性判定统一打业务接口
+//! `/api/site/address-poster`：首页 200 不算数，跳转页和发布页的 `/api/**` 全是 404。
 
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
@@ -29,8 +32,9 @@ pub const FIXED: [(&str, &str); 2] = [
 const POSTER_PATH: &str = "/api/site/address-poster";
 /// 地址发布页（兜底来源，大陆需代理）
 const PUBLISH_PAGE: &str = "https://huangguoai.pages.dev/";
-/// 大陆可直连的官方入口：当前线路取不到清单时用它们当探测源（清单接口只在站点本源上，不在中转页上）。
-const SEED_ORIGINS: [&str; 2] = ["https://ec2b.rlhjeyuvw.cc", "https://hgai13.com"];
+/// 大陆可直连的官方入口：当前线路取不到清单时用它们当探测源。
+/// 清单接口只在站点本源上；`hgai13.com` 是「最新地址入口」跳转页，`/api/**` 恒为 404，不能当探测源。
+const SEED_ORIGINS: [&str; 1] = ["https://ec2b.rlhjeyuvw.cc"];
 /// 镜像列表上限（地址清单通常只有几条，子域 × 域名最多会到几十条）
 const MIRROR_MAX: usize = 60;
 /// 单条线路探测超时
@@ -43,10 +47,27 @@ const PUBLISH_TIMEOUT: Duration = Duration::from_secs(9);
 /// 上次成功清单的落盘位置，由 [`bind`] 在启动时绑定。
 static CACHE_FILE: Lazy<RwLock<Option<PathBuf>>> = Lazy::new(|| RwLock::new(None));
 
+/// 用户手动添加的线路（同样是纯 HTTPS origin），与其落盘位置。
+static CUSTOM_FILE: Lazy<RwLock<Option<PathBuf>>> = Lazy::new(|| RwLock::new(None));
+static CUSTOM: Lazy<RwLock<Vec<String>>> = Lazy::new(|| RwLock::new(Vec::new()));
+/// 自定义条目上限：清单拉不到时靠它自救，但不能无限堆。
+const CUSTOM_MAX: usize = 12;
+
 /// 启动时绑定缓存路径（应用数据目录），与 `net::bind_base` 同一个目录。
 pub fn bind(dir: &std::path::Path) {
     if let Ok(mut file) = CACHE_FILE.write() {
         *file = Some(dir.join("lines.json"));
+    }
+    let path = dir.join("custom_lines.json");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Some(list) = parse_custom(&text) {
+            if let Ok(mut cur) = CUSTOM.write() {
+                *cur = list;
+            }
+        }
+    }
+    if let Ok(mut file) = CUSTOM_FILE.write() {
+        *file = Some(path);
     }
 }
 
@@ -55,6 +76,73 @@ pub fn fixed() -> Value {
         .iter()
         .map(|(name, url)| json!({ "name": name, "url": url }))
         .collect::<Vec<_>>())
+}
+
+/* ───────────────────────── 自定义线路 ───────────────────────── */
+
+pub fn custom() -> Value {
+    let list = CUSTOM.read().map(|l| l.clone()).unwrap_or_default();
+    json!(list
+        .iter()
+        .map(|url| {
+            let host = url::Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned))
+                .unwrap_or_default();
+            json!({ "name": "自定义线路", "url": url, "host": host })
+        })
+        .collect::<Vec<_>>())
+}
+
+/// 添加自定义线路：只收纯 HTTPS origin，重复条目按成功处理。
+/// 可用性不在这里判断，调用方应先跑一次 [`probe`]。
+pub fn custom_add(raw: &str) -> Result<String, String> {
+    let origin = crate::net::normalize_base(raw).ok_or_else(|| {
+        "线路地址无效（需要纯 HTTPS 站点地址，如 https://example.com，不能带路径或参数）".to_string()
+    })?;
+    if FIXED.iter().any(|(_, url)| origin == *url) {
+        return Err("这条已经内置在固定线路里".to_string());
+    }
+    let mut list = CUSTOM.write().map_err(|_| "自定义线路锁失败")?;
+    if list.contains(&origin) {
+        return Ok(origin);
+    }
+    if list.len() >= CUSTOM_MAX {
+        return Err(format!("自定义线路最多 {CUSTOM_MAX} 条，请先移除不用的"));
+    }
+    list.push(origin.clone());
+    save_custom(list.as_slice());
+    Ok(origin)
+}
+
+pub fn custom_remove(raw: &str) -> Result<(), String> {
+    let origin = crate::net::normalize_base(raw).ok_or("线路地址无效")?;
+    let mut list = CUSTOM.write().map_err(|_| "自定义线路锁失败")?;
+    list.retain(|url| url != &origin);
+    save_custom(list.as_slice());
+    Ok(())
+}
+
+fn save_custom(list: &[String]) {
+    let Some(path) = CUSTOM_FILE.read().ok().and_then(|p| p.clone()) else {
+        return;
+    };
+    let _ = std::fs::write(path, json!({ "items": list }).to_string());
+}
+
+/// 坏文件当没有；非 HTTPS、带路径的条目直接丢掉。
+fn parse_custom(text: &str) -> Option<Vec<String>> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let mut out: Vec<String> = Vec::new();
+    for raw in value.get("items")?.as_array()? {
+        let Some(origin) = raw.as_str().and_then(crate::net::normalize_base) else {
+            continue;
+        };
+        if !out.contains(&origin) {
+            out.push(origin);
+        }
+    }
+    Some(out)
 }
 
 /// 拉镜像线路：官方清单 → 地址发布页 → 上次缓存。只在用户点开「线路」时调用。
@@ -247,23 +335,44 @@ pub async fn probe(urls: Vec<String>) -> Value {
 }
 
 async fn probe_one(url: String) -> Value {
-    let target = format!("{}/", url.trim_end_matches('/'));
     let started = Instant::now();
-    let res = crate::net::get(
-        &target,
-        PROBE_TIMEOUT,
-        Some("text/html,application/xhtml+xml"),
-        None,
-    )
-    .await;
+    let res = business_check(&url).await;
     let ms = started.elapsed().as_millis() as u64;
     match res {
-        Ok(r) => {
-            let status = r.status().as_u16();
-            json!({ "url": url, "ok": status < 400, "status": status, "ms": ms })
-        }
+        Ok(status) => json!({ "url": url, "ok": true, "status": status, "ms": ms }),
         Err(e) => json!({ "url": url, "ok": false, "ms": ms, "error": e }),
     }
+}
+
+/// 判定一条线路能否当业务源用：必须取得到站点的地址清单。
+///
+/// 不能只看首页状态码——「最新地址入口」这类跳转页和静态发布页首页都是 200，
+/// 但 `/api/**` 全是 404，选中后必然加载失败（用户看到的就是「显示能连、加不上」）。
+async fn business_check(origin: &str) -> Result<u16, String> {
+    let target = format!("{}{POSTER_PATH}", origin.trim_end_matches('/'));
+    let resp = crate::net::get(&target, PROBE_TIMEOUT, Some("application/json"), None).await?;
+    let status = resp.status().as_u16();
+    if !resp.status().is_success() {
+        return Err(match status {
+            403 | 404 => format!("不是业务线路（地址清单 HTTP {status}，多半是跳转页）"),
+            500..=599 => format!("线路暂时不可用（HTTP {status}）"),
+            _ => format!("HTTP {status}"),
+        });
+    }
+    let text = resp.text().await.map_err(|e| crate::net::err_text(&e))?;
+    check_poster_body(&text)?;
+    Ok(status)
+}
+
+/// 地址清单必须是 JSON 且带 `data.config`；返回网页说明这一跳只是跳转页/发布页。
+fn check_poster_body(body: &str) -> Result<(), String> {
+    let value: Value = serde_json::from_str(body).map_err(|_| {
+        "不是业务线路（返回网页而不是接口数据，多半是跳转页或发布页）".to_string()
+    })?;
+    if value.get("data").and_then(|d| d.get("config")).is_none() {
+        return Err("不是业务线路（接口里没有地址清单配置）".to_string());
+    }
+    Ok(())
 }
 
 async fn get_text_within(url: &str, timeout: Duration) -> Result<String, String> {
@@ -440,6 +549,27 @@ var foreverUrls = [
                 "{raw}"
             );
         }
+    }
+
+    #[test]
+    fn probe_rejects_pages_without_business_config() {
+        assert!(check_poster_body(POSTER).is_ok());
+        assert!(check_poster_body(r#"{"data":{"config":{"addresses":[]}}}"#).is_ok());
+        assert!(check_poster_body(r#"{"status":0}"#).is_err());
+        assert!(check_poster_body(
+            "<html><head><title>404 Not Found</title></head><body>nginx</body></html>"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn custom_lines_only_keep_https_origins() {
+        let list = parse_custom(
+            r#"{"items":["https://a.example","http://b.example","https://c.example/path","https://a.example/"]}"#,
+        )
+        .unwrap();
+        assert_eq!(list, vec!["https://a.example"]);
+        assert!(parse_custom("{bad json").is_none());
     }
 
     #[test]
