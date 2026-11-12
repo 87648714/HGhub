@@ -16,6 +16,7 @@ function Row({ item, current, probe, busy, disabled, onPick, onProbe }: {
       <button onClick={() => onPick(item.url)} disabled={disabled} className="flex-1 min-w-0 text-left pressable disabled:opacity-60">
         <div className="flex items-center gap-1.5 text-[12.5px] text-on">
           <span className="truncate">{item.name || item.host || hostOf(item.url)}</span>
+          {!!item.note && <span className="shrink-0 rounded bg-s4 px-1 py-px text-[9.5px] font-normal text-mut">{item.note}</span>}
           {current && <ICheck size={13} className="text-mint shrink-0" />}
         </div>
         <div className="text-[10.5px] text-mut truncate mt-0.5">{item.url}</div>
@@ -37,6 +38,7 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
   const [state, setState] = useState<LineState | null>(null);
   const [mirrors, setMirrors] = useState<LineItem[] | null>(null);
   const [mirrorErr, setMirrorErr] = useState("");
+  const [mirrorCached, setMirrorCached] = useState(false);
   const [loadingMirrors, setLoadingMirrors] = useState(false);
   const [probes, setProbes] = useState<ProbeMap>({});
   const [probing, setProbing] = useState("");
@@ -52,8 +54,10 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
     try {
       const res = await api.lineMirrors();
       setMirrors(res?.items || []);
+      setMirrorCached(!!res?.cached);
     } catch (e) {
       setMirrors([]);
+      setMirrorCached(false);
       setMirrorErr((e as Error).message || "镜像线路获取失败");
     } finally {
       setLoadingMirrors(false);
@@ -133,7 +137,7 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
 
         <div className="flex items-center gap-2 px-1 mt-4 mb-1.5">
           <span className="text-[10.5px] font-semibold text-dim tracking-wide">镜像线路</span>
-          <span className="text-[10px] text-dim">一般可直连 · 仅游客浏览</span>
+          <span className="text-[10px] text-dim">{mirrorCached ? "上次缓存 · 仅游客浏览" : "一般可直连 · 仅游客浏览"}</span>
           <button onClick={() => { void readMirrors(); }} disabled={loadingMirrors}
             className="ml-auto inline-flex items-center gap-1 text-[10.5px] text-primary pressable disabled:opacity-50">
             <IRefresh size={12} />{loadingMirrors ? "获取中…" : "刷新"}
@@ -145,6 +149,7 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
             <div className="px-3.5 py-3">
               <div className="text-[11.5px] text-danger">镜像线路获取失败</div>
               <div className="text-[10.5px] text-mut mt-1 break-all">{mirrorErr}</div>
+              <div className="text-[10px] text-dim mt-1.5">可先在上面切到能用的线路，再点右上角「刷新」重试。</div>
             </div>
           )}
           {!loadingMirrors && !mirrorErr && mirrors?.length === 0 && (

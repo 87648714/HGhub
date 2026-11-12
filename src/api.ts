@@ -132,9 +132,10 @@ export type UpdateInfo = {
 
 /* ── 线路（数据源） ─────────────────────────────────────── */
 
-export type LineItem = { name?: string; url: string; host?: string };
+export type LineItem = { name?: string; url: string; host?: string; note?: string };
 export type LineState = { base: string; default: string; fixed: LineItem[] };
-export type LineMirrors = { source: string; script?: string; items: LineItem[] };
+/** `source`：清单来源（官方地址接口 / 地址发布页）；`cached`：两个来源都不可达，展示的是上次缓存 */
+export type LineMirrors = { source: string; script?: string; items: LineItem[]; cached?: boolean };
 export type LineProbe = { url: string; ok: boolean; status?: number; ms: number; error?: string };
 
 /** `https://a.b/c` → `a.b`（线路展示用） */
