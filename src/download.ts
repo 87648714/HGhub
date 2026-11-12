@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { VERSION_SKEW, isMissingCommand } from "./api";
 
 /* 下载：目录设置在 Rust 侧持久化（download.json），下载本身也在 Rust 侧完成
    （HLS 合并 + AES-128 解密），前端只负责发起任务和轮询进度。 */
@@ -36,6 +37,7 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
     return await invoke<T>(cmd, args);
   } catch (e) {
     const msg = typeof e === "string" ? e : (e as Error | null)?.message;
+    if (msg && isMissingCommand(msg)) throw new Error(VERSION_SKEW);
     throw new Error(msg && msg.trim() ? msg : "操作失败，请重试");
   }
 }

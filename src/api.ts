@@ -50,6 +50,12 @@ const GONE_PREFIX = "http_gone: ";
 export type GoneError = Error & { gone: true };
 export const isGone = (e: unknown) => (e as { gone?: boolean } | null | undefined)?.gone === true;
 
+/** Tauri 只有在前端调用了「当前内核没注册」的命令时才报 `Command xxx not found`：
+ *  典型情形是前端已更新、但还在跑旧的内核进程（Rust 侧没重新编译）。
+ *  原文对用户没有任何意义，统一换成可行动的提示，别让它冒充网络错误。 */
+export const VERSION_SKEW = "客户端内核版本过旧，请重新安装最新版本后再试";
+export const isMissingCommand = (msg: string) => /^command\s+\S+\s+not found$/i.test(msg.trim());
+
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   try {
     return (await invoke(cmd, args)) as T;
@@ -57,6 +63,7 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
     const msg = typeof e === "string" ? e : "请求失败，请检查网络";
     // 落盘完整错误链（dns error / connection refused / 证书错误…），toast 只显示截断版
     logLine(`[api] ${cmd} → ${msg}`);
+    if (isMissingCommand(msg)) throw new Error(VERSION_SKEW);
     if (msg.startsWith(GONE_PREFIX)) {
       const err = new Error(msg.slice(GONE_PREFIX.length).trim() || "内容已下线") as GoneError;
       err.gone = true;

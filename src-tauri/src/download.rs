@@ -213,6 +213,9 @@ pub fn dir_roots(app: tauri::AppHandle) -> Vec<DirEntry> {
     let mut items: Vec<DirEntry> = Vec::new();
     push_dir(&mut items, "下载", app.path().download_dir().ok());
     push_dir(&mut items, "视频", app.path().video_dir().ok());
+    // Android/iOS 的 PathResolver 没有 desktop_dir（tauri 的 path/android.rs 未实现），
+    // 无条件调用会让移动端编译失败，因此只在桌面平台列出「桌面」。
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     push_dir(&mut items, "桌面", app.path().desktop_dir().ok());
     push_dir(&mut items, "文档", app.path().document_dir().ok());
     push_dir(&mut items, "主目录", app.path().home_dir().ok());
